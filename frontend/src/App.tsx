@@ -5,7 +5,7 @@ import { formatDistanceToNow, parseISO } from 'date-fns';
 // Config - Change this to the real API URL when ready
 const API_URL = 'http://localhost:3000/api/agent/feed'; // Removed ?agentId=abc-123 so it falls back to our single agent
 const USE_MOCK_DATA = false; // Connect to the real backend API
-const POLL_INTERVAL_MS = 30000; // 30 seconds
+const POLL_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 
 // Types
 interface Post {
@@ -126,7 +126,7 @@ function App() {
                   <span>LIVE FEED</span>
                 </div>
                 <div className="text-gray-400 dark:text-gray-500 font-mono">
-                  Next sync in {timeUntilNextSync}s
+                  Next sync in {Math.floor(timeUntilNextSync / 60)}m {timeUntilNextSync % 60}s
                 </div>
               </div>
             </div>

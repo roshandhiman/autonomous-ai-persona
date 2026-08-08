@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/agent/tick?secret=my-super-secret-token",
+      "schedule": "*/15 * * * *"
+    }
+  ]
+}
