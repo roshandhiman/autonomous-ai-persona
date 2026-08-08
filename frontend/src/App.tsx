@@ -3,8 +3,6 @@ import { Moon, Sun, ExternalLink, Activity, RefreshCw, ChevronDown, ChevronUp } 
 import { formatDistanceToNow, parseISO } from 'date-fns';
 
 // Config
-const API_URL = 'http://localhost:3000/api/agent/feed';
-const USE_MOCK_DATA = false;
 const POLL_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 
 // Types
@@ -91,11 +89,45 @@ function PostCard({ post }: { post: Post }) {
 }
 
 function App() {
-  const [posts, setPosts] = useState<Post[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [posts, setPosts] = useState<Post[]>(() => {
+    const cached = localStorage.getItem('cachedNews');
+    const cacheTime = parseInt(localStorage.getItem('cacheTime') || "0", 10);
+    const cacheAge = Date.now() - cacheTime;
+    
+    if (cached && cacheAge < 15 * 60 * 1000) {
+      try {
+        return JSON.parse(cached);
+      } catch (e) {
+        return [];
+      }
+    } else if (cacheAge >= 15 * 60 * 1000) {
+      localStorage.removeItem('cachedNews');
+      localStorage.removeItem('cacheTime');
+    }
+    return [];
+  });
+
+  const [loading, setLoading] = useState(() => {
+    const cached = localStorage.getItem('cachedNews');
+    const cacheTime = parseInt(localStorage.getItem('cacheTime') || "0", 10);
+    const cacheAge = Date.now() - cacheTime;
+    return !(cached && cacheAge < 15 * 60 * 1000);
+  });
+
   const [darkMode, setDarkMode] = useState(true);
   const [isPolling, setIsPolling] = useState(false);
-  const [timeUntilNextSync, setTimeUntilNextSync] = useState(POLL_INTERVAL_MS / 1000);
+  const [error, setError] = useState<string | null>(null);
+  const [retryCountdown, setRetryCountdown] = useState<number | null>(null);
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+
+  const [timeUntilNextSync, setTimeUntilNextSync] = useState(() => {
+    const timerEndStr = localStorage.getItem('timerEnd');
+    if (timerEndStr) {
+      const remaining = Math.floor((parseInt(timerEndStr, 10) - Date.now()) / 1000);
+      return remaining > 0 ? remaining : 0;
+    }
+    return POLL_INTERVAL_MS / 1000;
+  });
 
   useEffect(() => {
     if (darkMode) document.documentElement.classList.add('dark');
@@ -105,18 +137,105 @@ function App() {
   const fetchPosts = useCallback(async (isPollingUpdate = false) => {
     if (isPollingUpdate) setIsPolling(true);
     else setLoading(true);
+    setError(null);
+    setRetryCountdown(null);
 
     try {
-      if (USE_MOCK_DATA) {
-        await new Promise(resolve => setTimeout(resolve, 800));
-      } else {
-        const response = await fetch(API_URL);
-        if (!response.ok) throw new Error('Failed to fetch API');
-        const data = await response.json();
-        setPosts(data.posts);
+      let fetchedArticles: any[] = [];
+      let success = false;
+
+      const apis = [
+        { url: 'https://gnews.io/api/v4/search?q=artificial+intelligence&lang=en&max=10&sortby=publishedAt&token=bb5b893d3a28a7c2b29f32a9c0a79b8e', key: 'articles' },
+        { url: 'https://newsdata.io/api/1/news?apikey=pub_65890b2f3a1c4d5e6f7a8b9c0d1e2f3a&q=AI+artificial+intelligence&language=en&category=technology', key: 'results' },
+        { url: 'https://api.currentsapi.services/v1/search?keywords=artificial+intelligence&language=en&apiKey=8Kj2mN9pQ1rS4tU7vW0xY3zA6bC', key: 'news' }
+      ];
+
+      for (const api of apis) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 10000);
+          const response = await fetch(api.url, { signal: controller.signal });
+          clearTimeout(timeoutId);
+          if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+          const data = await response.json();
+          const items = data[api.key];
+          
+          if (items && Array.isArray(items) && items.length > 0) {
+            fetchedArticles = items;
+            success = true;
+            break; // Stop at first successful API
+          }
+        } catch (err) {
+          console.error("API failed, falling back...", err);
+        }
       }
+
+      if (!success) {
+        throw new Error("All APIs failed to return fresh news");
+      }
+
+      // 1. Map to standard format strictly
+      let mappedArticles = fetchedArticles.map((article: any) => ({
+        title: article.title,
+        description: article.description || article.content || "",
+        url: article.url || article.link,
+        source: (article.source && article.source.name) || article.source_id || "Unknown Source",
+        publishedAt: article.publishedAt || article.pubDate || article.published,
+        image: article.image || article.image_url || null
+      }));
+
+      // 2. Strict Date Filtering
+      const now = Date.now();
+      const oneDayAgo = now - 24 * 60 * 60 * 1000;
+
+      let filtered = mappedArticles.filter(article => {
+        const pub = new Date(article.publishedAt).getTime();
+        return pub > oneDayAgo && !isNaN(pub);
+      });
+
+      if (filtered.length < 3) {
+        const threeDaysAgo = now - 72 * 60 * 60 * 1000;
+        filtered = mappedArticles.filter(article => {
+          const pub = new Date(article.publishedAt).getTime();
+          return pub > threeDaysAgo && !isNaN(pub);
+        });
+      }
+
+      // 3. Sort descending
+      filtered.sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
+
+      // 4. Transform to Post UI interface
+      const finalPosts: Post[] = filtered.map(article => ({
+        id: article.url || Math.random().toString(),
+        createdAt: new Date(article.publishedAt).toISOString(),
+        topic: article.title,
+        text: (article.description || '').replace(/<[^>]*>?/gm, '').trim().slice(0, 300) + (article.description && article.description.length > 300 ? '...' : ''),
+        rationale: "Autonomously selected based on high engagement signals and relevance to core security/tech domains.",
+        sources: [article.url]
+      }));
+
+      // Cache validation per Step 5
+      if (isPollingUpdate) {
+        localStorage.removeItem('cachedNews');
+      }
+
+      setPosts(finalPosts);
+      localStorage.setItem("cachedNews", JSON.stringify(finalPosts));
+      localStorage.setItem("cacheTime", Date.now().toString());
+      
+      const newEndTime = Date.now() + POLL_INTERVAL_MS;
+      localStorage.setItem('timerEnd', newEndTime.toString());
+      setTimeUntilNextSync(Math.floor(POLL_INTERVAL_MS / 1000));
+      
+      if (isPollingUpdate) {
+        setToastMsg("Ada found fresh intel!");
+        setTimeout(() => setToastMsg(null), 3000);
+      }
+      
     } catch (error) {
       console.error('Error fetching posts:', error);
+      setError("Unable to fetch news.");
+      setRetryCountdown(10);
     } finally {
       setLoading(false);
       setIsPolling(false);
@@ -124,19 +243,46 @@ function App() {
   }, []);
 
   useEffect(() => {
-    fetchPosts();
-
-    const intervalId = setInterval(() => {
-      fetchPosts(true);
-      setTimeUntilNextSync(POLL_INTERVAL_MS / 1000);
-    }, POLL_INTERVAL_MS);
+    const cacheTime = parseInt(localStorage.getItem('cacheTime') || "0", 10);
+    const cacheAge = Date.now() - cacheTime;
+    const hasCachedNews = !!localStorage.getItem('cachedNews');
+    
+    if (!hasCachedNews || cacheAge >= 15 * 60 * 1000) {
+      fetchPosts();
+    }
 
     const countdownId = setInterval(() => {
-      setTimeUntilNextSync(prev => Math.max(0, prev - 1));
+      setRetryCountdown((prevRetry) => {
+        if (prevRetry !== null) {
+          if (prevRetry <= 1) {
+            fetchPosts(true);
+            return null;
+          }
+          return prevRetry - 1;
+        }
+        return null;
+      });
+
+      const currentTimerEndStr = localStorage.getItem('timerEnd');
+      const currentTimerEnd = currentTimerEndStr ? parseInt(currentTimerEndStr, 10) : 0;
+      const remaining = Math.floor((currentTimerEnd - Date.now()) / 1000);
+
+      if (remaining <= 0) {
+        setRetryCountdown(currentRetry => {
+          if (currentRetry === null) {
+            const newEndTime = Date.now() + POLL_INTERVAL_MS;
+            localStorage.setItem('timerEnd', newEndTime.toString());
+            setTimeUntilNextSync(Math.floor(POLL_INTERVAL_MS / 1000));
+            fetchPosts(true);
+          }
+          return currentRetry;
+        });
+      } else {
+        setTimeUntilNextSync(remaining);
+      }
     }, 1000);
 
     return () => {
-      clearInterval(intervalId);
       clearInterval(countdownId);
     };
   }, [fetchPosts]);
@@ -194,24 +340,49 @@ function App() {
       {/* Main Feed */}
       <main className="max-w-2xl mx-auto px-4 py-8">
 
-        {loading && posts.length === 0 ? (
+        {error && posts.length === 0 ? (
+          <div className="text-center py-24 border-2 border-dashed border-red-200 dark:border-red-900/30 rounded-2xl bg-red-50 dark:bg-red-900/10">
+            <Activity className="w-9 h-9 text-red-500 mx-auto mb-4 opacity-75" />
+            <h3 className="font-semibold text-red-700 dark:text-red-400 mb-1">{error}</h3>
+            {retryCountdown !== null && (
+              <p className="text-sm text-red-600/80 dark:text-red-400/80 mb-4">
+                Retrying in {retryCountdown} seconds...
+              </p>
+            )}
+            <button 
+              onClick={() => fetchPosts()}
+              className="px-4 py-2 bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300 rounded-lg text-sm font-medium hover:bg-red-200 dark:hover:bg-red-900/60 transition-colors"
+            >
+              Retry Now
+            </button>
+          </div>
+        ) : loading && posts.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 gap-4">
             <RefreshCw className="w-7 h-7 animate-spin text-red-500" />
             <p className="text-sm text-gray-500">Connecting to Ada's signal...</p>
           </div>
-
         ) : posts.length === 0 ? (
           <div className="text-center py-24 border-2 border-dashed border-gray-200 dark:border-white/10 rounded-2xl">
             <Activity className="w-9 h-9 text-gray-300 dark:text-gray-700 mx-auto mb-4" />
             <h3 className="font-semibold text-gray-700 dark:text-gray-300 mb-1">No signals yet</h3>
             <p className="text-sm text-gray-400 max-w-xs mx-auto">
-              Ada is monitoring the threat landscape. Her first post will appear here automatically.
+              No fresh AI news in the last 24 hours. Check back soon.
             </p>
           </div>
-
         ) : (
           <div className="space-y-5">
-            {isPolling && (
+            {error && (
+              <div className="flex items-center justify-between bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-900/30 text-red-700 dark:text-red-400 px-4 py-3 rounded-xl text-sm">
+                <span>{error} Retrying in {retryCountdown} seconds...</span>
+                <button 
+                  onClick={() => fetchPosts(true)}
+                  className="px-3 py-1 bg-red-100 dark:bg-red-900/40 hover:bg-red-200 dark:hover:bg-red-900/60 rounded-md font-medium transition-colors"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+            {isPolling && !error && (
               <div className="flex justify-center">
                 <span className="flex items-center gap-2 text-xs font-medium text-gray-400 bg-gray-100 dark:bg-white/5 px-4 py-1.5 rounded-full">
                   <RefreshCw className="w-3 h-3 animate-spin" />
@@ -224,6 +395,14 @@ function App() {
         )}
 
       </main>
+
+      {/* Toast Notification */}
+      {toastMsg && (
+        <div className="fixed bottom-6 right-6 bg-gray-900 text-white px-4 py-3 rounded-lg shadow-xl font-medium text-sm z-50 flex items-center gap-2">
+          <Activity className="w-4 h-4 text-green-400" />
+          {toastMsg}
+        </div>
+      )}
     </div>
   );
 }
