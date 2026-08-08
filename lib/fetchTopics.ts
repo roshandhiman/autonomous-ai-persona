@@ -14,7 +14,7 @@ export async function fetchTopics(domain: string): Promise<Topic[]> {
   
   try {
     const response = await fetch(url, {
-      next: { revalidate: 3600 } // Optionally cache for 1 hour in Next.js
+      cache: 'no-store' // Always fetch fresh — never cache between tick runs
     });
 
     if (!response.ok) {
