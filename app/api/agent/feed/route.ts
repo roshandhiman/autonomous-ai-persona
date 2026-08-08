@@ -28,7 +28,7 @@ export async function GET(request: Request) {
 
     const { data, error } = await supabase
       .from('posts')
-      .select('id, text, rationale, sources, created_at')
+      .select('id, text, rationale, sources, topic, created_at')
       .eq('agent_id', agentId)
       .order('created_at', { ascending: false });
 
@@ -41,6 +41,7 @@ export async function GET(request: Request) {
     const posts = data.map((post) => ({
       id: post.id,
       createdAt: new Date(post.created_at).toISOString(),
+      topic: post.topic,
       text: post.text,
       rationale: post.rationale,
       sources: post.sources
