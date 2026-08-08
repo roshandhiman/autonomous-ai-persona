@@ -3,8 +3,8 @@ import { Moon, Sun, ExternalLink, Activity, RefreshCw } from 'lucide-react';
 import { formatDistanceToNow, parseISO } from 'date-fns';
 
 // Config - Change this to the real API URL when ready
-const API_URL = 'http://localhost:3000/api/agent/feed?agentId=abc-123';
-const USE_MOCK_DATA = true; // Toggle to false to use the real API
+const API_URL = 'http://localhost:3000/api/agent/feed'; // Removed ?agentId=abc-123 so it falls back to our single agent
+const USE_MOCK_DATA = false; // Connect to the real backend API
 const POLL_INTERVAL_MS = 30000; // 30 seconds
 
 // Types
@@ -48,6 +48,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [darkMode, setDarkMode] = useState(true); // Default to dark mode for that premium feel
   const [isPolling, setIsPolling] = useState(false);
+  const [timeUntilNextSync, setTimeUntilNextSync] = useState(POLL_INTERVAL_MS / 1000);
 
   // Toggle Dark Mode
   useEffect(() => {
@@ -84,11 +85,22 @@ function App() {
   // Initial fetch and polling setup
   useEffect(() => {
     fetchPosts();
+    
+    // Polling interval
     const intervalId = setInterval(() => {
       fetchPosts(true);
+      setTimeUntilNextSync(POLL_INTERVAL_MS / 1000);
     }, POLL_INTERVAL_MS);
 
-    return () => clearInterval(intervalId);
+    // Countdown timer
+    const countdownId = setInterval(() => {
+      setTimeUntilNextSync((prev) => Math.max(0, prev - 1));
+    }, 1000);
+
+    return () => {
+      clearInterval(intervalId);
+      clearInterval(countdownId);
+    };
   }, [fetchPosts]);
 
   return (
@@ -105,12 +117,17 @@ function App() {
             </div>
             <div>
               <h1 className="font-semibold text-lg leading-tight tracking-tight">Ada — AI Security Researcher</h1>
-              <div className="flex items-center space-x-2 text-xs font-medium text-accent mt-0.5">
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-accent"></span>
-                </span>
-                <span>LIVE FEED</span>
+              <div className="flex items-center space-x-3 text-xs font-medium text-accent mt-0.5">
+                <div className="flex items-center space-x-2">
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-accent"></span>
+                  </span>
+                  <span>LIVE FEED</span>
+                </div>
+                <div className="text-gray-400 dark:text-gray-500 font-mono">
+                  Next sync in {timeUntilNextSync}s
+                </div>
               </div>
             </div>
           </div>
