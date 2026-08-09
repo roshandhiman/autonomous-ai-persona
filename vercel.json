@@ -2,7 +2,7 @@
   "crons": [
     {
       "path": "/api/agent/tick?secret=my-super-secret-token",
-      "schedule": "*/15 * * * *"
+      "schedule": "0 0 * * *"
     }
   ]
 }
