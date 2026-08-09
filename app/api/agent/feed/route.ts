@@ -55,8 +55,17 @@ export async function GET(request: Request) {
       return NextResponse.json({ posts: [] }, { status: 200, headers: corsHeaders });
     }
 
+    // Filter out duplicate posts on the same topic
+    const seenTopicTitles = new Set<string>();
+    const uniquePosts = data.filter((post) => {
+      const titleKey = (post.topic || '').toLowerCase().trim();
+      if (titleKey && seenTopicTitles.has(titleKey)) return false;
+      if (titleKey) seenTopicTitles.add(titleKey);
+      return true;
+    });
+
     // Format strictly as requested
-    const posts = data.map((post) => ({
+    const posts = uniquePosts.map((post) => ({
       id: post.id,
       createdAt: new Date(post.created_at).toISOString(),
       topic: post.topic,
