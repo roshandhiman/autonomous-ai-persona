@@ -1,6 +1,11 @@
 import { supabase } from '@/lib/supabase';
-import { ADA_PERSONA } from '@/lib/persona';
 import { Topic } from '@/lib/fetchTopics';
+
+interface ReviewedTopic {
+  topic: string;
+  decision: 'published' | 'rejected';
+  reason: string;
+}
 
 interface GenerateResponse {
   decision: 'publish' | 'reject';
@@ -9,109 +14,162 @@ interface GenerateResponse {
   rationale: string;
   sources: string[];
   rejectionReason: string;
+  reviewedTopics: ReviewedTopic[];
+}
+
+const SECURITY_TERMS = [
+  'security', 'vulnerability', 'exploit', 'breach', 'jailbreak', 'prompt injection',
+  'adversarial', 'poisoning', 'privacy', 'leak', 'safety', 'alignment', 'red team',
+  'malware', 'ransomware', 'backdoor', 'cryptography', 'eval', 'benchmark',
+];
+
+const AI_TERMS = [
+  'ai', 'artificial intelligence', 'llm', 'large language model', 'machine learning',
+  'model', 'agent', 'openai', 'anthropic', 'deepmind', 'mistral', 'meta', 'nvidia',
+  'robotics', 'inference', 'training', 'dataset',
+];
+
+const REJECT_TERMS = [
+  'coupon', 'sale', 'stock market', 'price target', 'celebrity', 'sports',
+  'horoscope', 'top 10', 'crypto price',
+];
+
+function includesAny(text: string, terms: string[]) {
+  const lower = text.toLowerCase();
+  return terms.some((term) => lower.includes(term));
+}
+
+function scoreTopic(topic: Topic) {
+  const text = `${topic.title} ${topic.summary}`.toLowerCase();
+  let score = 0;
+  const reasons: string[] = [];
+
+  if (includesAny(text, AI_TERMS)) {
+    score += 4;
+    reasons.push('direct AI/technology relevance');
+  }
+
+  if (includesAny(text, SECURITY_TERMS)) {
+    score += 5;
+    reasons.push('security or safety implications');
+  }
+
+  if (topic.source === 'Hacker News') score += 1;
+  if (topic.source.startsWith('arXiv')) score += 2;
+  if (topic.points > 20) score += Math.min(3, Math.floor(topic.points / 50) + 1);
+
+  const ageHours = (Date.now() - new Date(topic.publishedAt).getTime()) / (60 * 60 * 1000);
+  if (ageHours <= 24) {
+    score += 3;
+    reasons.push('published within the last 24 hours');
+  } else if (ageHours <= 72) {
+    score += 1;
+    reasons.push('still inside the 72 hour freshness window');
+  }
+
+  if (includesAny(text, REJECT_TERMS)) {
+    score -= 6;
+    reasons.push('contains low-signal consumer or market noise');
+  }
+
+  if (!topic.summary && topic.title.length < 35) score -= 1;
+
+  return {
+    score,
+    reason: reasons.length ? reasons.join(', ') : 'low topical signal',
+  };
+}
+
+function buildPost(topic: Topic) {
+  const summary = topic.summary
+    ? ` The useful signal: ${topic.summary.slice(0, 180).replace(/\s+\S*$/, '')}.`
+    : '';
+
+  return [
+    `${topic.title}`,
+    '',
+    `Ada's read: this is worth watching because it sits close to the failure modes that matter in real systems, not the usual "AI changes everything" wallpaper.${summary}`,
+    '',
+    'The security question is simple: what new capability, dependency, or attack surface did this introduce, and who can verify the claims under adversarial pressure?',
+  ].join('\n');
 }
 
 export async function generatePost(topics: Topic[], agentId: string): Promise<GenerateResponse | null> {
-  try {
-    // 1. Fetch context to avoid duplicates
-    // Get last 5 published posts
-    const { data: recentPosts } = await supabase
-      .from('posts')
-      .select('topic')
-      .eq('agent_id', agentId)
-      .order('created_at', { ascending: false })
-      .limit(5);
+  const { data: recentPosts } = await supabase
+    .from('posts')
+    .select('topic')
+    .eq('agent_id', agentId)
+    .order('created_at', { ascending: false })
+    .limit(12);
 
-    // Get recently seen topics (whether rejected or published)
-    const { data: seenTopics } = await supabase
-      .from('seen_topics')
-      .select('topic_title, decision')
-      .eq('agent_id', agentId)
-      .order('created_at', { ascending: false })
-      .limit(20);
+  const { data: seenTopics } = await supabase
+    .from('seen_topics')
+    .select('topic_title, decision')
+    .eq('agent_id', agentId)
+    .order('created_at', { ascending: false })
+    .limit(80);
 
-    const recentPostTitles = recentPosts?.map((p) => p.topic) || [];
-    const seenTopicTitles = seenTopics?.map((s) => s.topic_title) || [];
+  const recentPostTitles = new Set((recentPosts || []).map((post) => post.topic.toLowerCase()));
+  const seenTopicTitles = new Set((seenTopics || []).map((seen) => seen.topic_title.toLowerCase()));
 
-    // Filter out candidate topics that are already exactly in seenTopics to save tokens, 
-    // though the LLM will also make a judgment.
-    const novelTopics = topics.filter(t => !seenTopicTitles.includes(t.title));
+  const novelTopics = topics.filter((topic) => {
+    const title = topic.title.toLowerCase();
+    return !seenTopicTitles.has(title) && !recentPostTitles.has(title);
+  });
 
-    if (novelTopics.length === 0) {
-      console.log('No novel topics found to process.');
-      return null;
-    }
-
-    // 2. Build the Prompt for Groq
-    const systemPrompt = `
-${ADA_PERSONA.systemPrompt}
-
-You will be provided with a list of recent AI-related news/stories (Candidate Topics) and context about what you have already posted.
-Your task is to act as the persona, review the Candidate Topics, and decide if ONE of them is worth publishing a post about.
-
-CRITICAL RULES:
-- "sources" MUST contain the exact URL from the Candidate Topics list. Do NOT invent or hallucinate URLs.
-- "rationale" MUST explicitly state: (1) WHY this specific topic was selected, (2) WHY it is relevant RIGHT NOW, and (3) WHY it was chosen OVER the other candidate topics (name them).
-- If you reject all topics, set "decision" to "reject", set "topic" to the best candidate you considered, and explain in "rejectionReason".
-- Do NOT publish topics that are already in "Recently reviewed topics".
-
-You must output your response in STRICT JSON format matching this schema exactly:
-{
-  "decision": "publish" | "reject",
-  "topic": "The exact title of the chosen topic from the candidates",
-  "text": "The actual post content written in your persona's voice (only if decision is publish, otherwise empty string)",
-  "rationale": "Why you selected this, why it is relevant now, and why you chose it over the other candidates (name the alternatives you rejected)",
-  "sources": ["The exact URL from the candidate topic — not fabricated"],
-  "rejectionReason": "If decision is reject, explain why none of the candidates met your standards. Otherwise empty string."
-}
-`;
-
-    const userPrompt = `
-Recent posts you made: ${JSON.stringify(recentPostTitles)}
-Recently reviewed topics: ${JSON.stringify(seenTopicTitles)}
-
-Candidate Topics to evaluate:
-${JSON.stringify(novelTopics, null, 2)}
-`;
-
-    // 3. Call Groq API (using fetch to standard OpenAI-compatible endpoint)
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        response_format: { type: 'json_object' },
-        temperature: 0.7,
-      }),
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error('Groq API Error:', errText);
-      return null;
-    }
-
-    const data = await response.json();
-    const resultText = data.choices[0]?.message?.content;
-
-    if (!resultText) {
-      console.error('No content returned from Groq');
-      return null;
-    }
-
-    // 4. Parse and return
-    const parsedResult = JSON.parse(resultText) as GenerateResponse;
-    return parsedResult;
-
-  } catch (error) {
-    console.error('Error in generatePost:', error);
+  if (novelTopics.length === 0) {
     return null;
   }
+
+  const judged = novelTopics.map((topic) => ({
+    topic,
+    ...scoreTopic(topic),
+  })).sort((a, b) => b.score - a.score);
+
+  const selected = judged[0];
+  const rejected = judged.slice(1, 8).map((candidate) => ({
+    topic: candidate.topic.title,
+    decision: 'rejected' as const,
+    reason: `Rejected: ${candidate.reason}; score ${candidate.score} was weaker than the selected candidate.`,
+  }));
+
+  if (!selected || selected.score < 6) {
+    return {
+      decision: 'reject',
+      topic: selected?.topic.title || novelTopics[0].title,
+      text: '',
+      rationale: '',
+      sources: selected ? [selected.topic.url] : [],
+      rejectionReason: selected
+        ? `Rejected all candidates. Best candidate scored ${selected.score}: ${selected.reason}. Ada requires fresh AI/technology signal with technical, security, or safety consequences.`
+        : 'Rejected all candidates because no publishable topics were available.',
+      reviewedTopics: [
+        {
+          topic: selected?.topic.title || novelTopics[0].title,
+          decision: 'rejected',
+          reason: selected?.reason || 'No publishable signal.',
+        },
+        ...rejected,
+      ],
+    };
+  }
+
+  const alternatives = rejected.slice(0, 3).map((item) => item.topic).join('; ') || 'lower-signal candidates';
+
+  return {
+    decision: 'publish',
+    topic: selected.topic.title,
+    text: buildPost(selected.topic),
+    rationale: `Selected because it has ${selected.reason}. It is relevant now because it was published at ${selected.topic.publishedAt} from ${selected.topic.source}, inside the live discovery window. Chosen over ${alternatives} because Ada prioritizes technically consequential AI/security developments over generic product noise.`,
+    sources: [selected.topic.url],
+    rejectionReason: '',
+    reviewedTopics: [
+      {
+        topic: selected.topic.title,
+        decision: 'published',
+        reason: `Published: ${selected.reason}; score ${selected.score}.`,
+      },
+      ...rejected,
+    ],
+  };
 }

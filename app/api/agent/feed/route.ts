@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
+import { runAgentCycle, shouldRunAgent } from '@/lib/agentCycle';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -19,17 +20,32 @@ export async function GET(request: Request) {
     // If no agentId is provided, fallback to fetching the first agent
     // (useful if you're building a simple single-agent UI)
     if (!agentId) {
-      const { data: firstAgent } = await supabase.from('agents').select('id').limit(1).single();
+      const { data: firstAgent } = await supabase
+        .from('agents')
+        .select('id')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
       if (!firstAgent) {
         return NextResponse.json({ posts: [] }, { status: 200, headers: corsHeaders });
       }
       agentId = firstAgent.id;
     }
 
+    if (!agentId) {
+      return NextResponse.json({ posts: [] }, { status: 200, headers: corsHeaders });
+    }
+
+    const activeAgentId: string = agentId;
+
+    if (await shouldRunAgent(activeAgentId)) {
+      await runAgentCycle(activeAgentId);
+    }
+
     const { data, error } = await supabase
       .from('posts')
       .select('id, text, rationale, sources, topic, created_at')
-      .eq('agent_id', agentId)
+      .eq('agent_id', activeAgentId)
       .order('created_at', { ascending: false });
 
     if (error) {

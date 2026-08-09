@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Moon, Sun, ExternalLink, Activity, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
 import { formatDistanceToNow, parseISO } from 'date-fns';
 
 // Config
 const POLL_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
 // Types
 interface Post {
@@ -89,30 +90,8 @@ function PostCard({ post }: { post: Post }) {
 }
 
 function App() {
-  const [posts, setPosts] = useState<Post[]>(() => {
-    const cached = localStorage.getItem('cachedNews');
-    const cacheTime = parseInt(localStorage.getItem('cacheTime') || "0", 10);
-    const cacheAge = Date.now() - cacheTime;
-    
-    if (cached && cacheAge < 15 * 60 * 1000) {
-      try {
-        return JSON.parse(cached);
-      } catch (e) {
-        return [];
-      }
-    } else if (cacheAge >= 15 * 60 * 1000) {
-      localStorage.removeItem('cachedNews');
-      localStorage.removeItem('cacheTime');
-    }
-    return [];
-  });
-
-  const [loading, setLoading] = useState(() => {
-    const cached = localStorage.getItem('cachedNews');
-    const cacheTime = parseInt(localStorage.getItem('cacheTime') || "0", 10);
-    const cacheAge = Date.now() - cacheTime;
-    return !(cached && cacheAge < 15 * 60 * 1000);
-  });
+  const [posts, setPosts] = useState<Post[]>([]);
+  const [loading, setLoading] = useState(true);
 
   const [darkMode, setDarkMode] = useState(true);
   const [isPolling, setIsPolling] = useState(false);
@@ -134,6 +113,28 @@ function App() {
     else document.documentElement.classList.remove('dark');
   }, [darkMode]);
 
+  const ensureAgentId = useCallback(async () => {
+    const cachedAgentId = localStorage.getItem('agentId');
+    if (cachedAgentId) return cachedAgentId;
+
+    const response = await fetch(`${API_BASE_URL}/api/agent/init`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        persona: {
+          name: 'Ada',
+          domain: 'AI Security',
+        },
+      }),
+    });
+
+    if (!response.ok) throw new Error(`Init failed with ${response.status}`);
+
+    const data = await response.json();
+    localStorage.setItem('agentId', data.agentId);
+    return data.agentId;
+  }, []);
+
   const fetchPosts = useCallback(async (isPollingUpdate = false) => {
     if (isPollingUpdate) setIsPolling(true);
     else setLoading(true);
@@ -141,87 +142,15 @@ function App() {
     setRetryCountdown(null);
 
     try {
-      let fetchedArticles: any[] = [];
-      let success = false;
-
-      const apis = [
-        { url: 'https://gnews.io/api/v4/search?q=artificial+intelligence&lang=en&max=10&sortby=publishedAt&token=bb5b893d3a28a7c2b29f32a9c0a79b8e', key: 'articles' },
-        { url: 'https://newsdata.io/api/1/news?apikey=pub_65890b2f3a1c4d5e6f7a8b9c0d1e2f3a&q=AI+artificial+intelligence&language=en&category=technology', key: 'results' },
-        { url: 'https://api.currentsapi.services/v1/search?keywords=artificial+intelligence&language=en&apiKey=8Kj2mN9pQ1rS4tU7vW0xY3zA6bC', key: 'news' }
-      ];
-
-      for (const api of apis) {
-        try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 10000);
-          const response = await fetch(api.url, { signal: controller.signal });
-          clearTimeout(timeoutId);
-          if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-          const data = await response.json();
-          const items = data[api.key];
-          
-          if (items && Array.isArray(items) && items.length > 0) {
-            fetchedArticles = items;
-            success = true;
-            break; // Stop at first successful API
-          }
-        } catch (err) {
-          console.error("API failed, falling back...", err);
-        }
-      }
-
-      if (!success) {
-        throw new Error("All APIs failed to return fresh news");
-      }
-
-      // 1. Map to standard format strictly
-      let mappedArticles = fetchedArticles.map((article: any) => ({
-        title: article.title,
-        description: article.description || article.content || "",
-        url: article.url || article.link,
-        source: (article.source && article.source.name) || article.source_id || "Unknown Source",
-        publishedAt: article.publishedAt || article.pubDate || article.published,
-        image: article.image || article.image_url || null
-      }));
-
-      // 2. Strict Date Filtering
-      const now = Date.now();
-      const oneDayAgo = now - 24 * 60 * 60 * 1000;
-
-      let filtered = mappedArticles.filter(article => {
-        const pub = new Date(article.publishedAt).getTime();
-        return pub > oneDayAgo && !isNaN(pub);
+      const agentId = await ensureAgentId();
+      const response = await fetch(`${API_BASE_URL}/api/agent/feed?agentId=${encodeURIComponent(agentId)}`, {
+        cache: 'no-store',
       });
 
-      if (filtered.length < 3) {
-        const threeDaysAgo = now - 72 * 60 * 60 * 1000;
-        filtered = mappedArticles.filter(article => {
-          const pub = new Date(article.publishedAt).getTime();
-          return pub > threeDaysAgo && !isNaN(pub);
-        });
-      }
+      if (!response.ok) throw new Error(`Feed failed with ${response.status}`);
 
-      // 3. Sort descending
-      filtered.sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
-
-      // 4. Transform to Post UI interface
-      const finalPosts: Post[] = filtered.map(article => ({
-        id: article.url || Math.random().toString(),
-        createdAt: new Date(article.publishedAt).toISOString(),
-        topic: article.title,
-        text: (article.description || '').replace(/<[^>]*>?/gm, '').trim().slice(0, 300) + (article.description && article.description.length > 300 ? '...' : ''),
-        rationale: "Autonomously selected based on high engagement signals and relevance to core security/tech domains.",
-        sources: [article.url]
-      }));
-
-      // Cache validation per Step 5
-      if (isPollingUpdate) {
-        localStorage.removeItem('cachedNews');
-      }
-
-      setPosts(finalPosts);
-      localStorage.setItem("cachedNews", JSON.stringify(finalPosts));
-      localStorage.setItem("cacheTime", Date.now().toString());
+      const data = await response.json();
+      setPosts(Array.isArray(data.posts) ? data.posts : []);
       
       const newEndTime = Date.now() + POLL_INTERVAL_MS;
       localStorage.setItem('timerEnd', newEndTime.toString());
@@ -240,16 +169,10 @@ function App() {
       setLoading(false);
       setIsPolling(false);
     }
-  }, []);
+  }, [ensureAgentId]);
 
   useEffect(() => {
-    const cacheTime = parseInt(localStorage.getItem('cacheTime') || "0", 10);
-    const cacheAge = Date.now() - cacheTime;
-    const hasCachedNews = !!localStorage.getItem('cachedNews');
-    
-    if (!hasCachedNews || cacheAge >= 15 * 60 * 1000) {
-      fetchPosts();
-    }
+    fetchPosts();
 
     const countdownId = setInterval(() => {
       setRetryCountdown((prevRetry) => {

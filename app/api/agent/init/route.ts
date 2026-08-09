@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
+import { runAgentCycle } from '@/lib/agentCycle';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -39,6 +40,8 @@ export async function POST(request: Request) {
         { status: 500, headers: corsHeaders }
       );
     }
+
+    await runAgentCycle(data.id);
 
     return NextResponse.json({ agentId: data.id }, { status: 200, headers: corsHeaders });
   } catch (err) {
