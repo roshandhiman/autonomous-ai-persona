@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { runAgentCycle } from '@/lib/agentCycle';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(request: Request) {
   return handleTick(request);
 }
