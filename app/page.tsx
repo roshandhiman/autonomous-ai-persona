@@ -26,6 +26,18 @@ function PostCard({ post }: { post: Post }) {
     }
   };
 
+  // Strip duplicate headline from beginning of text body if present
+  const cleanBodyText = (text: string, topic: string) => {
+    let cleaned = text.trim();
+    if (topic && cleaned.toLowerCase().startsWith(topic.toLowerCase())) {
+      cleaned = cleaned.slice(topic.length).trim();
+      cleaned = cleaned.replace(/^[\s:\-|]+/, '').trim();
+    }
+    return cleaned || text;
+  };
+
+  const displayText = cleanBodyText(post.text, post.topic);
+
   return (
     <article className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm transition-shadow duration-300 hover:shadow-lg dark:border-white/10 dark:bg-[#111111]">
       <div className="flex items-stretch">
@@ -40,7 +52,7 @@ function PostCard({ post }: { post: Post }) {
           </h2>
 
           <p className="mb-5 whitespace-pre-line text-[15px] leading-7 text-gray-700 dark:text-gray-300">
-            {post.text}
+            {displayText}
           </p>
 
           {post.sources?.length > 0 && (
@@ -82,6 +94,12 @@ function PostCard({ post }: { post: Post }) {
   );
 }
 
+function getNext15MinTarget() {
+  const now = Date.now();
+  const intervalMs = 15 * 60 * 1000;
+  return Math.ceil(now / intervalMs) * intervalMs;
+}
+
 export default function Home() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
@@ -90,15 +108,7 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [retryCountdown, setRetryCountdown] = useState<number | null>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
-  const [timeUntilNextSync, setTimeUntilNextSync] = useState(POLL_INTERVAL_MS / 1000);
-
-  useEffect(() => {
-    const timerEndStr = localStorage.getItem('timerEnd');
-    if (!timerEndStr) return;
-
-    const remaining = Math.floor((parseInt(timerEndStr, 10) - Date.now()) / 1000);
-    setTimeUntilNextSync(remaining > 0 ? remaining : 0);
-  }, []);
+  const [timeUntilNextSync, setTimeUntilNextSync] = useState(0);
 
   useEffect(() => {
     if (darkMode) document.documentElement.classList.add('dark');
@@ -151,10 +161,6 @@ export default function Home() {
       const data = await response.json();
       setPosts(Array.isArray(data.posts) ? data.posts : []);
 
-      const newEndTime = Date.now() + POLL_INTERVAL_MS;
-      localStorage.setItem('timerEnd', newEndTime.toString());
-      setTimeUntilNextSync(Math.floor(POLL_INTERVAL_MS / 1000));
-
       if (isPollingUpdate) {
         setToastMsg('Ada checked fresh sources.');
         setTimeout(() => setToastMsg(null), 3000);
@@ -172,36 +178,20 @@ export default function Home() {
   useEffect(() => {
     fetchPosts();
 
-    const countdownId = setInterval(() => {
-      setRetryCountdown((prevRetry) => {
-        if (prevRetry === null) return null;
-        if (prevRetry <= 1) {
-          fetchPosts(true);
-          return null;
-        }
-        return prevRetry - 1;
-      });
+    const updateTimer = () => {
+      const target = getNext15MinTarget();
+      const remaining = Math.max(0, Math.floor((target - Date.now()) / 1000));
+      setTimeUntilNextSync(remaining);
 
-      const currentTimerEndStr = localStorage.getItem('timerEnd');
-      const currentTimerEnd = currentTimerEndStr ? parseInt(currentTimerEndStr, 10) : 0;
-      const remaining = Math.floor((currentTimerEnd - Date.now()) / 1000);
-
-      if (remaining <= 0) {
-        setRetryCountdown((currentRetry) => {
-          if (currentRetry === null) {
-            const newEndTime = Date.now() + POLL_INTERVAL_MS;
-            localStorage.setItem('timerEnd', newEndTime.toString());
-            setTimeUntilNextSync(Math.floor(POLL_INTERVAL_MS / 1000));
-            fetchPosts(true);
-          }
-          return currentRetry;
-        });
-      } else {
-        setTimeUntilNextSync(remaining);
+      if (remaining === 0) {
+        fetchPosts(true);
       }
-    }, 1000);
+    };
 
-    return () => clearInterval(countdownId);
+    updateTimer();
+    const intervalId = setInterval(updateTimer, 1000);
+
+    return () => clearInterval(intervalId);
   }, [fetchPosts]);
 
   const mins = Math.floor(timeUntilNextSync / 60);

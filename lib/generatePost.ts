@@ -86,8 +86,6 @@ function buildPost(topic: Topic) {
     : '';
 
   return [
-    `${topic.title}`,
-    '',
     `Ada's read: this is worth watching because it sits close to the failure modes that matter in real systems, not the usual "AI changes everything" wallpaper.${summary}`,
     '',
     'The security question is simple: what new capability, dependency, or attack surface did this introduce, and who can verify the claims under adversarial pressure?',
